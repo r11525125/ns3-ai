@@ -1,7 +1,7 @@
 /* -*-  Mode: C++; c-file-style: "gnu"; indent-tabs-mode:nil; -*- */
 /*
- * Copyright (c) 2011-2018 Centre Tecnologic de Telecomunicacions 
- * de Catalunya (CTTC)
+ * Copyright (c) 2011-2018 Centre Tecnologic 
+ * de Telecomunicacions de Catalunya (CTTC)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -23,6 +23,9 @@
  *    - Pengyu Liu <eic_lpy@hust.edu.cn>
  *    - Hao Yin <haoyin@uw.edu>
  *    - Muyuan Shen <muyuan_shen@hust.edu.cn>
+ *
+ * Further modifications for demonstration of multi-flow, 
+ * multi-enb scenario (5G-V2X-like).
  */
 
  #include "ns3/applications-module.h"
@@ -37,63 +40,59 @@
  using namespace ns3;
  using namespace std;
  
- NS_LOG_COMPONENT_DEFINE("LenaSimpleEpc");
+ NS_LOG_COMPONENT_DEFINE("LenaV2XScenario");
  
  int
  main(int argc, char* argv[])
  {
-     uint16_t m_nUser = 5;
-     // although this speed is meaningless in reality, it has to be large to make CQI change
-     double speed = 10000;
+     // --- Simulation parameters ---
+     uint16_t nUePerEnb = 5;          // each eNB has how many UEs (vehicles)
+     uint32_t nEnb = 2;               // number of eNB
+     double simTime = 5.0;            // total simulation time (s)
+     string outputCsv = "lte_cqi_result.csv"; // CSV output file
+     bool enableFlowMonitor = true;   // set false to skip FlowMonitor
  
-     string datarate = "20Mbps";
-     uint32_t packetSize = 1200;
+     // "Vehicle" speed
+     double vehicleSpeed = 33.33; // ~120 km/h
+     // Alternatively, 50.0 => 180 km/h
  
-     // Set the simulation time
-     double simTime = 3.0;
- 
-     //=============================
-     // 新增：CSV 輸出檔名，可透過命令行改
-     //=============================
-     std::string outputCsv = "lte_cqi_result.csv";
- 
-     // Command line arguments
+     // Command line
      CommandLine cmd;
-     cmd.AddValue("simTime", "Total duration of the simulation [s])", simTime);
-     cmd.AddValue("datarate", "datarate", datarate);
-     cmd.AddValue("packetSize", "packetSize", packetSize);
-     cmd.AddValue("speed", "x-axis speed of moving UE", speed);
- 
-     // 新增參數：CSV 輸出檔
-     cmd.AddValue("outputCsv", "Output CSV filename for flow results", outputCsv);
- 
+     cmd.AddValue("nUePerEnb", "Number of UEs (vehicles) per eNB", nUePerEnb);
+     cmd.AddValue("nEnb", "Number of eNB (base stations)", nEnb);
+     cmd.AddValue("simTime", "Simulation time (s)", simTime);
+     cmd.AddValue("outputCsv", "CSV filename for flow results", outputCsv);
+     cmd.AddValue("vehicleSpeed", "Vehicle speed (m/s)", vehicleSpeed);
+     cmd.AddValue("enableFlowMonitor", "Enable FlowMonitor", enableFlowMonitor);
      cmd.Parse(argc, argv);
  
      ConfigStore inputConfig;
      inputConfig.ConfigureDefaults();
- 
-     // parse again so you can override default values from the command line
      cmd.Parse(argc, argv);
  
+     // Basic random seed
      RngSeedManager::SetSeed(6);
      RngSeedManager::SetRun(4);
  
+     // Create LTE and EPC
      Ptr<LteHelper> lteHelper = CreateObject<LteHelper>();
      Ptr<PointToPointEpcHelper> epcHelper = CreateObject<PointToPointEpcHelper>();
      lteHelper->SetEpcHelper(epcHelper);
+     // Use custom Round-Robin scheduler that calls into ns3-ai
      lteHelper->SetSchedulerType("ns3::MyRrMacScheduler");
      lteHelper->SetAttribute("PathlossModel", StringValue("ns3::FriisSpectrumPropagationLossModel"));
  
+     // PGW
      Ptr<Node> pgw = epcHelper->GetPgwNode();
  
-     // Create a single RemoteHost
+     // Create remote host
      NodeContainer remoteHostContainer;
      remoteHostContainer.Create(1);
      Ptr<Node> remoteHost = remoteHostContainer.Get(0);
      InternetStackHelper internet;
      internet.Install(remoteHostContainer);
  
-     // Create the Internet
+     // Use a big fat pipe to connect PGW and RemoteHost
      PointToPointHelper p2ph;
      p2ph.SetDeviceAttribute("DataRate", DataRateValue(DataRate("100Gb/s")));
      p2ph.SetDeviceAttribute("Mtu", UintegerValue(1500));
@@ -107,158 +106,249 @@
      Ipv4StaticRoutingHelper ipv4RoutingHelper;
      Ptr<Ipv4StaticRouting> remoteHostStaticRouting =
          ipv4RoutingHelper.GetStaticRouting(remoteHost->GetObject<Ipv4>());
-     remoteHostStaticRouting->AddNetworkRouteTo(Ipv4Address("7.0.0.0"), Ipv4Mask("255.0.0.0"), 1);
+     remoteHostStaticRouting->AddNetworkRouteTo(
+         Ipv4Address("7.0.0.0"), Ipv4Mask("255.0.0.0"), 1);
  
-     NodeContainer ueNodes;
+     // Create eNB nodes
      NodeContainer enbNodes;
-     enbNodes.Create(1);
-     ueNodes.Create(m_nUser);
+     enbNodes.Create(nEnb);
  
-     // Install Mobility Model
+     // Create UE nodes
+     NodeContainer ueNodes;
+     ueNodes.Create(nEnb * nUePerEnb);
+ 
+     // Position eNBs
      Ptr<ListPositionAllocator> enbPositionAlloc = CreateObject<ListPositionAllocator>();
+     // e.g. place each eNB 500m apart on x-axis
+     double distEnb = 500.0; 
+     for (uint32_t i = 0; i < nEnb; ++i)
+     {
+         enbPositionAlloc->Add(Vector(i * distEnb, 0.0, 20.0)); // height = 20m
+     }
+     MobilityHelper enbMobility;
+     enbMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+     enbMobility.SetPositionAllocator(enbPositionAlloc);
+     enbMobility.Install(enbNodes);
+ 
+     // Position UEs (vehicles)
+     //   Suppose each eNB has nUePerEnb vehicles
+     //   We'll place them initially behind the eNB, 
+     //   then let them move in +x direction at 'vehicleSpeed'
      Ptr<ListPositionAllocator> uePositionAlloc = CreateObject<ListPositionAllocator>();
-     enbPositionAlloc->Add(Vector(0, 0, 25));
-     uePositionAlloc->Add(Vector(-15000, 8000, 1.5));   // the moving ue
-     uePositionAlloc->Add(Vector(10000, 10000, 1.5));   // stable ue #1
-     uePositionAlloc->Add(Vector(-10000, 10000, 1.5));  // stable ue #2
-     uePositionAlloc->Add(Vector(-10000, -10000, 1.5)); // stable ue #3
-     uePositionAlloc->Add(Vector(10000, -10000, 1.5));  // stable ue #4
-     MobilityHelper mobility;
-     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-     mobility.SetPositionAllocator(enbPositionAlloc);
-     mobility.Install(enbNodes);
-     mobility.SetMobilityModel("ns3::ConstantVelocityMobilityModel");
-     mobility.SetPositionAllocator(uePositionAlloc);
-     mobility.Install(ueNodes);
+     // let's space them out 50m behind the eNB
+     // e.g. if eNB i is at x_i, then the j-th UE is around x_i - 300, 
+     // with some small offset in y
+     for (uint32_t i = 0; i < nEnb; ++i)
+     {
+         double enbX = i * distEnb;
+         for (uint32_t j = 0; j < nUePerEnb; ++j)
+         {
+             double offsetY = (j % 2 == 0) ? 20.0 : -20.0; // just some variation
+             uePositionAlloc->Add(Vector(enbX - 300.0, offsetY, 1.5)); // vehicle height=1.5
+         }
+     }
  
-     // set speed for the moving ue
-     Vector sp(speed, 0, 0);
-     ueNodes.Get(0)->GetObject<ConstantVelocityMobilityModel>()->SetVelocity(sp);
+     MobilityHelper ueMobility;
+     ueMobility.SetMobilityModel("ns3::ConstantVelocityMobilityModel");
+     ueMobility.SetPositionAllocator(uePositionAlloc);
+     ueMobility.Install(ueNodes);
  
-     // Install LTE Devices to the nodes
+     // Set velocity
+     for (uint32_t idx = 0; idx < ueNodes.GetN(); idx++)
+     {
+         Ptr<ConstantVelocityMobilityModel> mobilityModel =
+             ueNodes.Get(idx)->GetObject<ConstantVelocityMobilityModel>();
+         // move along x direction
+         Vector speedVec(vehicleSpeed, 0.0, 0.0);
+         mobilityModel->SetVelocity(speedVec);
+     }
+ 
+     // Install LTE Devices
      NetDeviceContainer enbLteDevs = lteHelper->InstallEnbDevice(enbNodes);
      NetDeviceContainer ueLteDevs = lteHelper->InstallUeDevice(ueNodes);
  
-     Ptr<LteEnbNetDevice> lteEnbDev = enbLteDevs.Get(0)->GetObject<LteEnbNetDevice>();
-     Ptr<LteEnbPhy> enbPhy = lteEnbDev->GetPhy();
-     enbPhy->SetAttribute("TxPower", DoubleValue(30.0));
-     enbPhy->SetAttribute("NoiseFigure", DoubleValue(5.0));
+     // Some basic PHY config
+     for (uint32_t i = 0; i < nEnb; ++i)
+     {
+         Ptr<LteEnbNetDevice> enbLteDev = enbLteDevs.Get(i)->GetObject<LteEnbNetDevice>();
+         Ptr<LteEnbPhy> enbPhy = enbLteDev->GetPhy();
+         enbPhy->SetAttribute("TxPower", DoubleValue(30.0));
+         enbPhy->SetAttribute("NoiseFigure", DoubleValue(5.0));
+     }
  
-     // Install the IP stack on the UEs
+     // Install IP stack on UEs
      internet.Install(ueNodes);
-     Ipv4InterfaceContainer ueIpIface;
-     ueIpIface = epcHelper->AssignUeIpv4Address(NetDeviceContainer(ueLteDevs));
-     // Assign IP address to UEs, and install applications
+     Ipv4InterfaceContainer ueIpIfaces = epcHelper->AssignUeIpv4Address(NetDeviceContainer(ueLteDevs));
+ 
+     // Attach UE to eNB (Round-robin or nearest eNB in real scenario; here let's do all in i-th group to i-th eNB)
+     for (uint32_t i = 0; i < nEnb; ++i)
+     {
+         for (uint32_t j = 0; j < nUePerEnb; ++j)
+         {
+             uint32_t idx = i * nUePerEnb + j;
+             lteHelper->Attach(ueLteDevs.Get(idx), enbLteDevs.Get(i));
+         }
+     }
+ 
+     // Set default route for UEs
      for (uint32_t u = 0; u < ueNodes.GetN(); ++u)
      {
-         Ptr<Node> ueNode = ueNodes.Get(u);
-         // Set the default gateway for the UE
          Ptr<Ipv4StaticRouting> ueStaticRouting =
-             ipv4RoutingHelper.GetStaticRouting(ueNode->GetObject<Ipv4>());
+             ipv4RoutingHelper.GetStaticRouting(ueNodes.Get(u)->GetObject<Ipv4>());
          ueStaticRouting->SetDefaultRoute(epcHelper->GetUeDefaultGatewayAddress(), 1);
      }
  
-     enum EpsBearer::Qci q = EpsBearer::GBR_CONV_VOICE;
+     // Bearers
+     enum EpsBearer::Qci q = EpsBearer::GBR_CONV_VOICE; 
      EpsBearer bearer(q);
  
-     // Attach the UEs to the eNB
-     for (uint16_t i = 0; i < m_nUser; i++)
+     //===========================
+     // Create multiple flows
+     //===========================
+ 
+     // 1) VoIP-like flow (small pkts, high freq, e.g. 8kb/s ~ 24kb/s)
+     // 2) Video-like flow (bigger pkts, moderate freq)
+     // 3) Best-effort background (could be TCP or UDP)
+ 
+     // remoteHost => UE: downlink traffic
+     uint16_t dlPortBase = 4000; 
+     ApplicationContainer apps; 
+     double startTime = 0.1;
+     double stopTime = simTime;
+ 
+     // 依序給每個 UE 裝幾種 App
+     for (uint32_t u = 0; u < ueNodes.GetN(); u++)
      {
-         lteHelper->Attach(ueLteDevs.Get(i), enbLteDevs.Get(0));
-         // side effect: the default EPS bearer will be activated
+         Ipv4Address ueAddr = ueIpIfaces.GetAddress(u);
+ 
+         // (1) VoIP-like (UDP)
+         {
+             uint16_t dlPort = dlPortBase++;
+             UdpClientHelper voipClient(ueAddr, dlPort);
+             voipClient.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
+             voipClient.SetAttribute("PacketSize", UintegerValue(160));  // small size
+             voipClient.SetAttribute("Interval", TimeValue(MilliSeconds(20))); // 50 pkts/s => 8kbps
+             
+             ApplicationContainer voipServer;
+             PacketSinkHelper voipSink("ns3::UdpSocketFactory",
+                                       InetSocketAddress(Ipv4Address::GetAny(), dlPort));
+             voipServer = voipSink.Install(ueNodes.Get(u));
+             voipServer.Start(Seconds(startTime));
+             voipServer.Stop(Seconds(stopTime));
+             
+             // client on remote host
+             ApplicationContainer voipClientApp = voipClient.Install(remoteHost);
+             voipClientApp.Start(Seconds(startTime));
+             voipClientApp.Stop(Seconds(stopTime));
+             apps.Add(voipServer);
+             apps.Add(voipClientApp);
+         }
+ 
+         // (2) Video-like (UDP)
+         {
+             uint16_t dlPort = dlPortBase++;
+             UdpClientHelper videoClient(ueAddr, dlPort);
+             videoClient.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
+             // e.g. 1200 bytes every 5ms => 1.92Mbps
+             videoClient.SetAttribute("PacketSize", UintegerValue(1200));
+             videoClient.SetAttribute("Interval", TimeValue(MilliSeconds(5)));
+             
+             ApplicationContainer videoServer;
+             PacketSinkHelper videoSink("ns3::UdpSocketFactory",
+                                        InetSocketAddress(Ipv4Address::GetAny(), dlPort));
+             videoServer = videoSink.Install(ueNodes.Get(u));
+             videoServer.Start(Seconds(startTime));
+             videoServer.Stop(Seconds(stopTime));
+ 
+             ApplicationContainer videoClientApp = videoClient.Install(remoteHost);
+             videoClientApp.Start(Seconds(startTime));
+             videoClientApp.Stop(Seconds(stopTime));
+             apps.Add(videoServer);
+             apps.Add(videoClientApp);
+         }
+ 
+         // (3) Best-effort (TCP)
+         {
+             uint16_t dlPort = dlPortBase++;
+             BulkSendHelper bulkClient("ns3::TcpSocketFactory",
+                                       InetSocketAddress(ueAddr, dlPort));
+             bulkClient.SetAttribute("MaxBytes", UintegerValue(0)); // unlimited
+ 
+             ApplicationContainer bulkServer;
+             PacketSinkHelper bulkSink("ns3::TcpSocketFactory",
+                                       InetSocketAddress(Ipv4Address::GetAny(), dlPort));
+             bulkServer = bulkSink.Install(ueNodes.Get(u));
+             bulkServer.Start(Seconds(startTime));
+             bulkServer.Stop(Seconds(stopTime));
+ 
+             ApplicationContainer bulkClientApp = bulkClient.Install(remoteHost);
+             bulkClientApp.Start(Seconds(startTime));
+             bulkClientApp.Stop(Seconds(stopTime));
+             apps.Add(bulkServer);
+             apps.Add(bulkClientApp);
+         }
      }
  
-     Time udpInterval =
-         Time::FromDouble((packetSize * 8) / static_cast<double>(DataRate(datarate).GetBitRate()),
-                          Time::S);
- 
-     // Install and start applications on UEs and remote host
-     uint16_t dlPort = 1234;
-     ApplicationContainer clientApps;
-     ApplicationContainer serverApps;
-     for (uint32_t u = 0; u < ueNodes.GetN(); ++u)
-     {
-         dlPort++;
-         PacketSinkHelper dlPacketSinkHelper("ns3::UdpSocketFactory",
-                                             InetSocketAddress(Ipv4Address::GetAny(), dlPort));
- 
-         serverApps.Add(dlPacketSinkHelper.Install(ueNodes.Get(u)));
- 
-         UdpClientHelper dlClient(ueIpIface.GetAddress(u), dlPort);
-         dlClient.SetAttribute("PacketSize", UintegerValue(packetSize));
-         dlClient.SetAttribute("Interval", TimeValue(udpInterval));
-         dlClient.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
- 
-         clientApps.Add(dlClient.Install(remoteHost));
-     }
- 
-     serverApps.Start(MilliSeconds(10));
-     clientApps.Start(MilliSeconds(10));
+     // Enable traces
      lteHelper->EnableTraces();
  
+     // Optionally install FlowMonitor
+     Ptr<FlowMonitor> monitor;
      FlowMonitorHelper flowmon;
-     Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+     if (enableFlowMonitor)
+     {
+         monitor = flowmon.InstallAll();
+     }
  
-     Ptr<RadioBearerStatsCalculator> rlcStats = lteHelper->GetRlcStats();
-     rlcStats->SetAttribute("EpochDuration", TimeValue(Seconds(simTime)));
- 
+     // Stop
      Simulator::Stop(Seconds(simTime));
      Simulator::Run();
  
-     cout << "Begin Simulation Results" << endl;
- 
-     monitor->CheckForLostPackets();
- 
-     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
-     map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats();
- 
-     double Throughput = 0.0;
- 
-     //========================================
-     // 新增：將結果寫到 CSV
-     //========================================
-     std::ofstream outFile;
-     outFile.open(outputCsv.c_str());
-     outFile << "FlowID,TxPackets,RxPackets,Throughput(Kbps),AverageDelay(s)\n";
- 
-     for (map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin(); i != stats.end();
-          ++i)
+     //--- Write flow monitor results to CSV ---
+     if (enableFlowMonitor)
      {
-         Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
+         monitor->CheckForLostPackets();
  
-         cout << "Flow ID: " << i->first << " Src Addr " << t.sourceAddress
-              << " Dst Addr " << t.destinationAddress << endl;
-         cout << "Tx Packets = " << i->second.txPackets << endl;
-         cout << "Rx Packets = " << i->second.rxPackets << endl;
+         Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
+         map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats();
  
-         Throughput =
-             i->second.rxBytes * 8.0 /
-             (i->second.timeLastRxPacket.GetSeconds() - i->second.timeFirstTxPacket.GetSeconds()) /
-             1024;
+         std::ofstream outFile;
+         outFile.open(outputCsv.c_str());
+         outFile << "FlowID,SrcAddr,DstAddr,TxPackets,RxPackets,Throughput(Kbps),AverageDelay(s)\n";
  
-         cout << "Throughput: " << Throughput << " Kbps" << endl;
- 
-         // 取得平均延遲 (需要 rxPackets > 0)
-         double avgDelay = 0.0;
-         if (i->second.rxPackets > 0)
+         for (auto &flow: stats)
          {
-             avgDelay = i->second.delaySum.GetSeconds() / i->second.rxPackets;
+             FlowId id = flow.first;
+             FlowMonitor::FlowStats st = flow.second;
+             Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(id);
+ 
+             double throughputKbps = 0.0;
+             if (st.timeLastRxPacket.GetSeconds() - st.timeFirstTxPacket.GetSeconds() > 0)
+             {
+                 throughputKbps = (st.rxBytes * 8.0) /
+                                   (st.timeLastRxPacket.GetSeconds() - st.timeFirstTxPacket.GetSeconds()) / 1024.0;
+             }
+ 
+             double avgDelay = 0.0;
+             if (st.rxPackets > 0)
+             {
+                 avgDelay = st.delaySum.GetSeconds() / st.rxPackets;
+             }
+ 
+             outFile << id << ","
+                     << t.sourceAddress << ","
+                     << t.destinationAddress << ","
+                     << st.txPackets << ","
+                     << st.rxPackets << ","
+                     << throughputKbps << ","
+                     << avgDelay << "\n";
          }
-         cout << "Average Delay: " << avgDelay << " s" << endl;
- 
-         // 寫進 CSV
-         outFile << i->first << ","
-                 << i->second.txPackets << ","
-                 << i->second.rxPackets << ","
-                 << Throughput << ","
-                 << avgDelay << "\n";
+         outFile.close();
      }
-     outFile.close();
- 
-     NS_LOG_UNCOND("Done");
-     cout << "End Simulation Results" << endl;
  
      Simulator::Destroy();
+ 
+     NS_LOG_UNCOND("Done. Simulation finished.");
      return 0;
  }
  
